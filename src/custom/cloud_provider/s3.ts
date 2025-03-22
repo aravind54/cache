@@ -1,20 +1,23 @@
-import {
-    S3Client,
-    GetObjectCommand,
-    ListObjectsV2Command
-} from "@aws-sdk/client-s3";
-const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
-import { createReadStream } from "fs";
-import * as crypto from "crypto";
+import * as utils from "@actions/cache/lib/internal/cacheUtils";
+import { CompressionMethod } from "@actions/cache/lib/internal/constants";
 import {
     DownloadOptions,
     getDownloadOptions
 } from "@actions/cache/lib/options";
-import { CompressionMethod } from "@actions/cache/lib/internal/constants";
 import * as core from "@actions/core";
-import * as utils from "@actions/cache/lib/internal/cacheUtils";
+import {
+    GetObjectCommand,
+    ListObjectsV2Command,
+    S3Client
+} from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
-import { downloadCacheHttpClientConcurrent } from "./downloadUtils";
+import * as crypto from "crypto";
+import { createReadStream } from "fs";
+
+import { downloadCacheHttpClientConcurrent } from "../downloadUtils";
+
+/* eslint-disable */
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
 export interface ArtifactCacheEntry {
     cacheKey?: string;
@@ -35,7 +38,7 @@ if (process.env.RUNS_ON_RUNNER_NAME && process.env.RUNS_ON_RUNNER_NAME !== "") {
 }
 
 const versionSalt = "1.0";
-const bucketName = process.env.RUNS_ON_S3_BUCKET_CACHE;
+const bucketName = process.env.BUCKET_NAME;
 const region =
     process.env.RUNS_ON_AWS_REGION ||
     process.env.AWS_REGION ||
@@ -144,11 +147,11 @@ export async function downloadCache(
     options?: DownloadOptions
 ): Promise<void> {
     if (!bucketName) {
-        throw new Error("Environment variable RUNS_ON_S3_BUCKET_CACHE not set");
+        throw new Error("Environment variable BUCKET_NAME not set");
     }
 
     if (!region) {
-        throw new Error("Environment variable RUNS_ON_AWS_REGION not set");
+        throw new Error("Environment variable AWS_REGION not set");
     }
 
     const archiveUrl = new URL(archiveLocation);
@@ -175,11 +178,11 @@ export async function saveCache(
     { compressionMethod, enableCrossOsArchive, cacheSize: archiveFileSize }
 ): Promise<void> {
     if (!bucketName) {
-        throw new Error("Environment variable RUNS_ON_S3_BUCKET_CACHE not set");
+        throw new Error("Environment variable BUCKET_NAME not set");
     }
 
     if (!region) {
-        throw new Error("Environment variable RUNS_ON_AWS_REGION not set");
+        throw new Error("Environment variable AWS_REGION not set");
     }
 
     const s3Prefix = getS3Prefix(paths, {

@@ -1,6 +1,6 @@
-name: 'Fast actions/cache for S3'
-description: 'Drop-in GitHub actions/cache replacement with S3 backend'
-author: 'RunsOn'
+name: 'Fast actions/cache for Cloud Environment'
+description: 'Drop-in GitHub actions/cache replacement for Cloud environment'
+author: 'aravind54'
 inputs:
   path:
     description: 'A list of files, directories, and wildcard patterns to cache and restore'

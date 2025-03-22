@@ -1,15 +1,18 @@
 // https://github.com/actions/toolkit/blob/%40actions/cache%403.2.2/packages/cache/src/cache.ts
 
-import * as core from "@actions/core";
-import * as path from "path";
 import * as utils from "@actions/cache/lib/internal/cacheUtils";
-import * as cacheHttpClient from "./backend";
 import {
     createTar,
     extractTar,
     listTar
 } from "@actions/cache/lib/internal/tar";
 import { DownloadOptions, UploadOptions } from "@actions/cache/lib/options";
+import * as core from "@actions/core";
+import * as path from "path";
+
+// cloud provider clients
+import * as gcsClient from "./cloud_provider/gcs";
+import * as s3Client from "./cloud_provider/s3";
 
 export class ValidationError extends Error {
     constructor(message: string) {
@@ -48,13 +51,24 @@ function checkKey(key: string): void {
         );
     }
 }
-
+/**
+ * getStorageClient returns cloud provider client functionalites based on CLOUD_PROVIDER
+ *
+ * @returns boolean return true if Actions cache service feature is available, otherwise false
+ */
+const getStorageClient = () => {
+    const cloudProvider = process.env.CLOUD_PROVIDER || "gcs"; // Default to GCS if not set
+    if (cloudProvider === "aws") {
+        return s3Client;
+    } else {
+        return gcsClient;
+    }
+};
 /**
  * isFeatureAvailable to check the presence of Actions cache service
  *
  * @returns boolean return true if Actions cache service feature is available, otherwise false
  */
-
 export function isFeatureAvailable(): boolean {
     return !!process.env["ACTIONS_CACHE_URL"];
 }
@@ -97,7 +111,7 @@ export async function restoreCache(
     let archivePath = "";
     try {
         // path are needed to compute version
-        const cacheEntry = await cacheHttpClient.getCacheEntry(keys, paths, {
+        const cacheEntry = await getStorageClient().getCacheEntry(keys, paths, {
             compressionMethod,
             enableCrossOsArchive
         });
@@ -118,7 +132,7 @@ export async function restoreCache(
         core.debug(`Archive Path: ${archivePath}`);
 
         // Download the cache from the cache entry
-        await cacheHttpClient.downloadCache(
+        await getStorageClient().downloadCache(
             cacheEntry.archiveLocation,
             archivePath,
             options
@@ -206,7 +220,7 @@ export async function saveCache(
         const archiveFileSize = utils.getArchiveFileSizeInBytes(archivePath);
         core.debug(`File Size: ${archiveFileSize}`);
 
-        await cacheHttpClient.saveCache(key, paths, archivePath, {
+        await getStorageClient().saveCache(key, paths, archivePath, {
             compressionMethod,
             enableCrossOsArchive,
             cacheSize: archiveFileSize
