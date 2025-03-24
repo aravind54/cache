@@ -58,6 +58,7 @@ function checkKey(key: string): void {
  */
 const getStorageClient = () => {
     const cloudProvider = process.env.CLOUD_PROVIDER || "gcs"; // Default to GCS if not set
+    core.info(`Cloud provider ${cloudProvider}`);
     if (cloudProvider === "aws") {
         return s3Client;
     } else {

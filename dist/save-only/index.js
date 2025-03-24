@@ -121488,6 +121488,7 @@ function checkKey(key) {
  */
 const getStorageClient = () => {
     const cloudProvider = process.env.CLOUD_PROVIDER || "gcs"; // Default to GCS if not set
+    core.info(`Cloud provider ${cloudProvider}`);
     if (cloudProvider === "aws") {
         return s3Client;
     }
@@ -121748,12 +121749,15 @@ function getCacheEntry(keys, paths, { compressionMethod, enableCrossOsArchive })
 exports.getCacheEntry = getCacheEntry;
 function downloadCache(archiveLocation, archivePath, options) {
     return __awaiter(this, void 0, void 0, function* () {
+        core.info(`Inside Download cache function ${bucketName}`);
+        core.info(archiveLocation);
         if (!bucketName) {
             throw new Error("Environment variable BUCKET_NAME not set");
         }
         const archiveUrl = new URL(archiveLocation);
         const objectKey = archiveUrl.pathname.slice(1);
         const file = bucket.file(objectKey);
+        core.info(objectKey);
         const [url] = yield file.getSignedUrl({
             action: "read",
             expires: Date.now() + 3600 * 1000

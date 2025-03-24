@@ -100,6 +100,8 @@ export async function downloadCache(
     archivePath: string,
     options?: DownloadOptions
 ): Promise<void> {
+    core.info(`Inside Download cache function ${bucketName}`);
+    core.info(archiveLocation);
     if (!bucketName) {
         throw new Error("Environment variable BUCKET_NAME not set");
     }
@@ -107,6 +109,7 @@ export async function downloadCache(
     const archiveUrl = new URL(archiveLocation);
     const objectKey = archiveUrl.pathname.slice(1);
     const file = bucket.file(objectKey);
+    core.info(objectKey);
 
     const [url] = await file.getSignedUrl({
         action: "read",
