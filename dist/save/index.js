@@ -121598,19 +121598,20 @@ function saveCache(paths, key, options, enableCrossOsArchive = false) {
         const cachePaths = yield utils.resolvePaths(paths);
         core.debug("Cache Paths:");
         core.debug(`${JSON.stringify(cachePaths)}`);
+        core.info(`${JSON.stringify(cachePaths)}`);
         if (cachePaths.length === 0) {
             throw new Error(`Path Validation Error: Path(s) specified in the action for caching do(es) not exist, hence no cache is being saved.`);
         }
         const archiveFolder = yield utils.createTempDirectory();
         const archivePath = path.join(archiveFolder, utils.getCacheFileName(compressionMethod));
-        core.debug(`Archive Path: ${archivePath}`);
+        core.info(`Archive Path: ${archivePath}`);
         try {
             yield (0, tar_1.createTar)(archiveFolder, cachePaths, compressionMethod);
             if (core.isDebug()) {
                 yield (0, tar_1.listTar)(archivePath, compressionMethod);
             }
             const archiveFileSize = utils.getArchiveFileSizeInBytes(archivePath);
-            core.debug(`File Size: ${archiveFileSize}`);
+            core.info(`File Size: ${archiveFileSize}`);
             yield getStorageClient().saveCache(key, paths, archivePath, {
                 compressionMethod,
                 enableCrossOsArchive,
@@ -121687,7 +121688,6 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.saveCache = exports.downloadCache = exports.getCacheEntry = exports.getCacheVersion = void 0;
-const utils = __importStar(__nccwpck_require__(91518));
 const core = __importStar(__nccwpck_require__(42186));
 const storage_1 = __nccwpck_require__(27577);
 const crypto = __importStar(__nccwpck_require__(6113));
@@ -121771,22 +121771,42 @@ function saveCache(key, paths, archivePath, { compressionMethod, enableCrossOsAr
         if (!bucketName) {
             throw new Error("Environment variable BUCKET_NAME not set");
         }
+        // Construct your GCS key / prefix.
+        // You can rename this to `getGcsPrefix` if you use a custom helper.
         const gcsPrefix = getGcsPrefix(paths, {
             compressionMethod,
             enableCrossOsArchive
         });
         const gcsKey = `${gcsPrefix}/${key}`;
-        const file = bucket.file(gcsKey);
-        const cacheSize = utils.getArchiveFileSizeInBytes(archivePath);
+        // Get the cache size for logging
+        const cacheSize = archiveFileSize
+            ? archiveFileSize
+            : (0, fs_1.statSync)(archivePath).size; // or use your utility function
         core.info(`Cache Size: ~${Math.round(cacheSize / (1024 * 1024))} MB (${cacheSize} B)`);
-        const writeStream = file.createWriteStream();
+        core.info(`Uploading cache from ${archivePath} to gs://${bucketName}/${gcsKey}`);
+        // Initialize GCS client and references
+        const storage = new storage_1.Storage();
+        const bucket = storage.bucket(bucketName);
+        const file = bucket.file(gcsKey);
+        // Create the read stream from our archive file
         const readStream = (0, fs_1.createReadStream)(archivePath);
-        readStream.pipe(writeStream);
-        writeStream.on("finish", () => {
-            core.info(`Cache saved successfully.`);
+        // (Optional) Track read progress for logs
+        let bytesUploaded = 0;
+        readStream.on("data", chunk => {
+            bytesUploaded += chunk.length;
+            core.info(`Uploaded ${bytesUploaded} of ${cacheSize} bytes...`);
         });
-        writeStream.on("error", error => {
-            throw new Error(`Error saving cache to GCS: ${error}`);
+        // Pipe it to GCS via createWriteStream (resumable by default)
+        yield new Promise((resolve, reject) => {
+            readStream
+                .pipe(file.createWriteStream({ resumable: true }))
+                .on("error", err => {
+                reject(err);
+            })
+                .on("finish", () => {
+                core.info("Cache saved successfully.");
+                resolve();
+            });
         });
     });
 }

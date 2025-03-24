@@ -1,10 +1,9 @@
-import * as utils from "@actions/cache/lib/internal/cacheUtils";
 import { CompressionMethod } from "@actions/cache/lib/internal/constants";
 import { DownloadOptions } from "@actions/cache/lib/options";
 import * as core from "@actions/core";
 import { Storage } from "@google-cloud/storage";
 import * as crypto from "crypto";
-import { createReadStream } from "fs";
+import { createReadStream, statSync } from "fs";
 
 import { downloadCacheHttpClientConcurrent } from "../downloadUtils";
 
@@ -128,36 +127,67 @@ export async function saveCache(
     key: string,
     paths: string[],
     archivePath: string,
-    { compressionMethod, enableCrossOsArchive, cacheSize: archiveFileSize }
+    {
+        compressionMethod,
+        enableCrossOsArchive,
+        cacheSize: archiveFileSize
+    }: {
+        compressionMethod: string;
+        enableCrossOsArchive: boolean;
+        cacheSize: number;
+    }
 ): Promise<void> {
     if (!bucketName) {
         throw new Error("Environment variable BUCKET_NAME not set");
     }
 
+    // Construct your GCS key / prefix.
+    // You can rename this to `getGcsPrefix` if you use a custom helper.
     const gcsPrefix = getGcsPrefix(paths, {
         compressionMethod,
         enableCrossOsArchive
     });
     const gcsKey = `${gcsPrefix}/${key}`;
-    const file = bucket.file(gcsKey);
 
-    const cacheSize = utils.getArchiveFileSizeInBytes(archivePath);
+    // Get the cache size for logging
+    const cacheSize = archiveFileSize
+        ? archiveFileSize
+        : statSync(archivePath).size; // or use your utility function
     core.info(
         `Cache Size: ~${Math.round(
             cacheSize / (1024 * 1024)
         )} MB (${cacheSize} B)`
     );
 
-    const writeStream = file.createWriteStream();
+    core.info(
+        `Uploading cache from ${archivePath} to gs://${bucketName}/${gcsKey}`
+    );
+
+    // Initialize GCS client and references
+    const storage = new Storage();
+    const bucket = storage.bucket(bucketName);
+    const file = bucket.file(gcsKey);
+
+    // Create the read stream from our archive file
     const readStream = createReadStream(archivePath);
 
-    readStream.pipe(writeStream);
-
-    writeStream.on("finish", () => {
-        core.info(`Cache saved successfully.`);
+    // (Optional) Track read progress for logs
+    let bytesUploaded = 0;
+    readStream.on("data", chunk => {
+        bytesUploaded += chunk.length;
+        core.info(`Uploaded ${bytesUploaded} of ${cacheSize} bytes...`);
     });
 
-    writeStream.on("error", error => {
-        throw new Error(`Error saving cache to GCS: ${error}`);
+    // Pipe it to GCS via createWriteStream (resumable by default)
+    await new Promise<void>((resolve, reject) => {
+        readStream
+            .pipe(file.createWriteStream({ resumable: true }))
+            .on("error", err => {
+                reject(err);
+            })
+            .on("finish", () => {
+                core.info("Cache saved successfully.");
+                resolve();
+            });
     });
 }
