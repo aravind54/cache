@@ -58,7 +58,6 @@ function checkKey(key: string): void {
  */
 const getStorageClient = () => {
     const cloudProvider = process.env.CLOUD_PROVIDER || "gcs"; // Default to GCS if not set
-    core.info(`Cloud provider ${cloudProvider}`);
     if (cloudProvider === "aws") {
         return s3Client;
     } else {
@@ -195,11 +194,9 @@ export async function saveCache(
     const compressionMethod = await utils.getCompressionMethod();
     let cacheId = -1;
 
-    
     const cachePaths = await utils.resolvePaths(paths);
     core.debug("Cache Paths:");
     core.debug(`${JSON.stringify(cachePaths)}`);
-    core.info(`${JSON.stringify(cachePaths)}`)
     if (cachePaths.length === 0) {
         throw new Error(
             `Path Validation Error: Path(s) specified in the action for caching do(es) not exist, hence no cache is being saved.`
@@ -211,7 +208,6 @@ export async function saveCache(
         archiveFolder,
         utils.getCacheFileName(compressionMethod)
     );
-    core.info(`Archive Path: ${archivePath}`)
 
     try {
         await createTar(archiveFolder, cachePaths, compressionMethod);
@@ -219,7 +215,6 @@ export async function saveCache(
             await listTar(archivePath, compressionMethod);
         }
         const archiveFileSize = utils.getArchiveFileSizeInBytes(archivePath);
-        core.info(`File Size: ${archiveFileSize}`)
 
         await getStorageClient().saveCache(key, paths, archivePath, {
             compressionMethod,

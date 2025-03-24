@@ -121488,7 +121488,6 @@ function checkKey(key) {
  */
 const getStorageClient = () => {
     const cloudProvider = process.env.CLOUD_PROVIDER || "gcs"; // Default to GCS if not set
-    core.info(`Cloud provider ${cloudProvider}`);
     if (cloudProvider === "aws") {
         return s3Client;
     }
@@ -121598,20 +121597,17 @@ function saveCache(paths, key, options, enableCrossOsArchive = false) {
         const cachePaths = yield utils.resolvePaths(paths);
         core.debug("Cache Paths:");
         core.debug(`${JSON.stringify(cachePaths)}`);
-        core.info(`${JSON.stringify(cachePaths)}`);
         if (cachePaths.length === 0) {
             throw new Error(`Path Validation Error: Path(s) specified in the action for caching do(es) not exist, hence no cache is being saved.`);
         }
         const archiveFolder = yield utils.createTempDirectory();
         const archivePath = path.join(archiveFolder, utils.getCacheFileName(compressionMethod));
-        core.info(`Archive Path: ${archivePath}`);
         try {
             yield (0, tar_1.createTar)(archiveFolder, cachePaths, compressionMethod);
             if (core.isDebug()) {
                 yield (0, tar_1.listTar)(archivePath, compressionMethod);
             }
             const archiveFileSize = utils.getArchiveFileSizeInBytes(archivePath);
-            core.info(`File Size: ${archiveFileSize}`);
             yield getStorageClient().saveCache(key, paths, archivePath, {
                 compressionMethod,
                 enableCrossOsArchive,
@@ -121749,15 +121745,12 @@ function getCacheEntry(keys, paths, { compressionMethod, enableCrossOsArchive })
 exports.getCacheEntry = getCacheEntry;
 function downloadCache(archiveLocation, archivePath, options) {
     return __awaiter(this, void 0, void 0, function* () {
-        core.info(`Inside Download cache function ${bucketName}`);
-        core.info(archiveLocation);
         if (!bucketName) {
             throw new Error("Environment variable BUCKET_NAME not set");
         }
         const archiveUrl = new URL(archiveLocation);
         const objectKey = archiveUrl.pathname.slice(1);
         const file = bucket.file(objectKey);
-        core.info(objectKey);
         const [url] = yield file.getSignedUrl({
             action: "read",
             expires: Date.now() + 3600 * 1000
@@ -121799,7 +121792,10 @@ function saveCache(key, paths, archivePath, { compressionMethod, enableCrossOsAr
         // Pipe it to GCS via createWriteStream (resumable by default)
         yield new Promise((resolve, reject) => {
             readStream
-                .pipe(file.createWriteStream({ resumable: true }))
+                .pipe(file.createWriteStream({
+                resumable: true,
+                chunkSize: uploadPartSize
+            }))
                 .on("error", err => {
                 reject(err);
             })
