@@ -137,6 +137,9 @@ export async function saveCache(
     if (!bucketName) {
         throw new Error("Environment variable BUCKET_NAME not set");
     }
+    const LOG_INTERVAL_BYTES = 50 * 1024 * 1024; // 30 MB
+
+    let nextLogThreshold = LOG_INTERVAL_BYTES;
 
     // Construct your GCS key / prefix.
     // You can rename this to `getGcsPrefix` if you use a custom helper.
@@ -156,7 +159,7 @@ export async function saveCache(
         )} MB (${cacheSize} B)`
     );
 
-    core.info(
+    core.debug(
         `Uploading cache from ${archivePath} to gs://${bucketName}/${gcsKey}`
     );
 
@@ -172,7 +175,14 @@ export async function saveCache(
     let bytesUploaded = 0;
     readStream.on("data", chunk => {
         bytesUploaded += chunk.length;
-        core.info(`Uploaded ${bytesUploaded} of ${cacheSize} bytes...`);
+
+        if (bytesUploaded >= nextLogThreshold) {
+            const uploadedMB = (bytesUploaded / (1024 * 1024)).toFixed(2);
+            const totalMB = (cacheSize / (1024 * 1024)).toFixed(2);
+
+            core.info(`Uploaded ${uploadedMB} MB of ${totalMB} MB ...`);
+            nextLogThreshold += LOG_INTERVAL_BYTES;
+        }
     });
 
     // Pipe it to GCS via createWriteStream (resumable by default)

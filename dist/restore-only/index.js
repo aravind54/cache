@@ -121764,6 +121764,8 @@ function saveCache(key, paths, archivePath, { compressionMethod, enableCrossOsAr
         if (!bucketName) {
             throw new Error("Environment variable BUCKET_NAME not set");
         }
+        const LOG_INTERVAL_BYTES = 50 * 1024 * 1024; // 30 MB
+        let nextLogThreshold = LOG_INTERVAL_BYTES;
         // Construct your GCS key / prefix.
         // You can rename this to `getGcsPrefix` if you use a custom helper.
         const gcsPrefix = getGcsPrefix(paths, {
@@ -121776,7 +121778,7 @@ function saveCache(key, paths, archivePath, { compressionMethod, enableCrossOsAr
             ? archiveFileSize
             : (0, fs_1.statSync)(archivePath).size; // or use your utility function
         core.info(`Cache Size: ~${Math.round(cacheSize / (1024 * 1024))} MB (${cacheSize} B)`);
-        core.info(`Uploading cache from ${archivePath} to gs://${bucketName}/${gcsKey}`);
+        core.debug(`Uploading cache from ${archivePath} to gs://${bucketName}/${gcsKey}`);
         // Initialize GCS client and references
         const storage = new storage_1.Storage();
         const bucket = storage.bucket(bucketName);
@@ -121787,7 +121789,12 @@ function saveCache(key, paths, archivePath, { compressionMethod, enableCrossOsAr
         let bytesUploaded = 0;
         readStream.on("data", chunk => {
             bytesUploaded += chunk.length;
-            core.info(`Uploaded ${bytesUploaded} of ${cacheSize} bytes...`);
+            if (bytesUploaded >= nextLogThreshold) {
+                const uploadedMB = (bytesUploaded / (1024 * 1024)).toFixed(2);
+                const totalMB = (cacheSize / (1024 * 1024)).toFixed(2);
+                core.info(`Uploaded ${uploadedMB} MB of ${totalMB} MB ...`);
+                nextLogThreshold += LOG_INTERVAL_BYTES;
+            }
         });
         // Pipe it to GCS via createWriteStream (resumable by default)
         yield new Promise((resolve, reject) => {
