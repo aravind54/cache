@@ -122365,7 +122365,7 @@ function saveImpl(stateProvider) {
             });
             const enableCrossOsArchive = utils.getInputAsBool(constants_1.Inputs.EnableCrossOsArchive);
             if (canSaveToS3) {
-                core.info("The cache action detected a local S3 bucket cache. Using it.");
+                core.info("The cache action detected a remote bucket cache. Using it.");
                 cacheId = yield custom.saveCache(cachePaths, primaryKey, {
                     uploadChunkSize: utils.getInputAsInt(constants_1.Inputs.UploadChunkSize)
                 }, enableCrossOsArchive);

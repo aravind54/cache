@@ -67,7 +67,7 @@ export async function saveImpl(
 
         if (canSaveToS3) {
             core.info(
-                "The cache action detected a local S3 bucket cache. Using it."
+                "The cache action detected a remote bucket cache. Using it."
             );
 
             cacheId = await custom.saveCache(

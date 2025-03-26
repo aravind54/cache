@@ -122353,7 +122353,7 @@ function restoreImpl(stateProvider, earlyExit) {
             const lookupOnly = utils.getInputAsBool(constants_1.Inputs.LookupOnly);
             let cacheKey;
             if (canSaveToS3) {
-                core.info("The cache action detected a local S3 bucket cache. Using it.");
+                core.info("The cache action detected a local remote bucket cache. Using it.");
                 cacheKey = yield custom.restoreCache(cachePaths, primaryKey, restoreKeys, { lookupOnly: lookupOnly });
             }
             else {

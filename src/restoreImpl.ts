@@ -49,7 +49,7 @@ export async function restoreImpl(
 
         if (canSaveToS3) {
             core.info(
-                "The cache action detected a local S3 bucket cache. Using it."
+                "The cache action detected a local remote bucket cache. Using it."
             );
             cacheKey = await custom.restoreCache(
                 cachePaths,
