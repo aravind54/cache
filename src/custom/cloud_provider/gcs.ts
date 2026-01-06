@@ -3,7 +3,7 @@ import { DownloadOptions } from "@actions/cache/lib/options";
 import * as core from "@actions/core";
 import { Storage } from "@google-cloud/storage";
 import * as crypto from "crypto";
-import { createReadStream, statSync } from "fs";
+import { createReadStream, statSync, promises as fsPromises } from "fs";
 
 import { downloadCacheHttpClientConcurrent } from "../downloadUtils";
 
@@ -23,10 +23,10 @@ const bucket = storage.bucket(bucketName);
 const versionSalt = "1.0";
 const uploadQueueSize = Number(process.env.UPLOAD_QUEUE_SIZE || "4");
 const uploadPartSize =
-    Number(process.env.UPLOAD_PART_SIZE || "32") * 1024 * 1024;
+    Number(process.env.UPLOAD_PART_SIZE || "64") * 1024 * 1024;
 const downloadQueueSize = Number(process.env.DOWNLOAD_QUEUE_SIZE || "8");
 const downloadPartSize =
-    Number(process.env.DOWNLOAD_PART_SIZE || "16") * 1024 * 1024;
+    Number(process.env.DOWNLOAD_PART_SIZE || "32") * 1024 * 1024;
 
 export function getCacheVersion(
     paths: string[],
@@ -120,6 +120,175 @@ export async function downloadCache(
     });
 }
 
+interface UploadPart {
+    partNumber: number;
+    offset: number;
+    size: number;
+    partKey: string;
+}
+
+async function uploadPartWithRetry(
+    storage: Storage,
+    bucketName: string,
+    archivePath: string,
+    part: UploadPart,
+    retries = 3
+): Promise<void> {
+    let lastError: Error | undefined;
+
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const fileHandle = await fsPromises.open(archivePath, "r");
+            try {
+                const buffer = Buffer.alloc(part.size);
+                await fileHandle.read(buffer, 0, part.size, part.offset);
+
+                const bucket = storage.bucket(bucketName);
+                const file = bucket.file(part.partKey);
+
+                await new Promise<void>((resolve, reject) => {
+                    const stream = file.createWriteStream({
+                        resumable: true
+                    });
+
+                    stream.on("error", reject);
+                    stream.on("finish", () => resolve());
+
+                    stream.end(buffer);
+                });
+
+                core.debug(
+                    `Successfully uploaded part ${part.partNumber} (${(part.size / (1024 * 1024)).toFixed(2)} MB)`
+                );
+                return;
+            } finally {
+                await fileHandle.close();
+            }
+        } catch (error) {
+            lastError = error as Error;
+            if (attempt < retries) {
+                core.warning(
+                    `Failed to upload part ${part.partNumber} (attempt ${attempt}/${retries}): ${lastError.message}`
+                );
+                await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+            }
+        }
+    }
+
+    throw new Error(
+        `Failed to upload part ${part.partNumber} after ${retries} attempts: ${lastError?.message}`
+    );
+}
+
+async function uploadInParallel(
+    storage: Storage,
+    bucketName: string,
+    archivePath: string,
+    gcsKey: string,
+    fileSize: number
+): Promise<void> {
+    const partSize = uploadPartSize;
+    const concurrency = uploadQueueSize;
+
+    // For small files, use simple upload
+    if (fileSize <= partSize) {
+        core.debug("File size is small, using simple upload");
+        const bucket = storage.bucket(bucketName);
+        const file = bucket.file(gcsKey);
+        const readStream = createReadStream(archivePath);
+
+        await new Promise<void>((resolve, reject) => {
+            readStream
+                .pipe(
+                    file.createWriteStream({
+                        resumable: true
+                    })
+                )
+                .on("error", reject)
+                .on("finish", resolve);
+        });
+        return;
+    }
+
+    core.info(
+        `Starting parallel upload with ${concurrency} concurrent parts of ${(partSize / (1024 * 1024)).toFixed(0)} MB each`
+    );
+
+    const parts: UploadPart[] = [];
+    let partNumber = 0;
+
+    for (let offset = 0; offset < fileSize; offset += partSize) {
+        const size = Math.min(partSize, fileSize - offset);
+        parts.push({
+            partNumber: partNumber++,
+            offset,
+            size,
+            partKey: `${gcsKey}.part${partNumber}`
+        });
+    }
+
+    core.info(`Uploading ${parts.length} parts in parallel...`);
+
+    // Upload parts with controlled concurrency
+    const activeUploads: Promise<void>[] = [];
+    let completed = 0;
+    const LOG_INTERVAL = 10;
+
+    for (const part of parts) {
+        const uploadPromise = uploadPartWithRetry(
+            storage,
+            bucketName,
+            archivePath,
+            part
+        ).then(() => {
+            completed++;
+            if (completed % LOG_INTERVAL === 0 || completed === parts.length) {
+                const progress = ((completed / parts.length) * 100).toFixed(1);
+                core.info(
+                    `Upload progress: ${completed}/${parts.length} parts (${progress}%)`
+                );
+            }
+        });
+
+        activeUploads.push(uploadPromise);
+
+        if (activeUploads.length >= concurrency) {
+            await Promise.race(activeUploads);
+            // Remove completed promises
+            const newActiveUploads = activeUploads.filter(p => {
+                let completed = false;
+                p.then(() => {
+                    completed = true;
+                }).catch(() => {
+                    completed = true;
+                });
+                return !completed;
+            });
+            activeUploads.splice(0, activeUploads.length, ...newActiveUploads);
+        }
+    }
+
+    // Wait for all remaining uploads to complete
+    await Promise.all(activeUploads);
+
+    core.info("All parts uploaded, composing final object...");
+
+    // Compose all parts into the final object
+    const bucket = storage.bucket(bucketName);
+    const finalFile = bucket.file(gcsKey);
+    const partFiles = parts.map(part => bucket.file(part.partKey));
+
+    await finalFile.save("", { resumable: false }); // Create empty file first
+    await bucket.combine(partFiles.map(f => f.name), gcsKey);
+
+    core.info("Composed final object, cleaning up parts...");
+
+    // Delete temporary part files
+    await Promise.all(partFiles.map(file => file.delete().catch(() => {})));
+
+    core.info("Parallel upload completed successfully");
+}
+
 export async function saveCache(
     key: string,
     paths: string[],
@@ -137,12 +306,8 @@ export async function saveCache(
     if (!bucketName) {
         throw new Error("Environment variable BUCKET_NAME not set");
     }
-    const LOG_INTERVAL_BYTES = 50 * 1024 * 1024; // 30 MB
-
-    let nextLogThreshold = LOG_INTERVAL_BYTES;
 
     // Construct your GCS key / prefix.
-    // You can rename this to `getGcsPrefix` if you use a custom helper.
     const gcsPrefix = getGcsPrefix(paths, {
         compressionMethod,
         enableCrossOsArchive
@@ -152,54 +317,22 @@ export async function saveCache(
     // Get the cache size for logging
     const cacheSize = archiveFileSize
         ? archiveFileSize
-        : statSync(archivePath).size; // or use your utility function
+        : statSync(archivePath).size;
     core.info(
         `Cache Size: ~${Math.round(
             cacheSize / (1024 * 1024)
         )} MB (${cacheSize} B)`
     );
 
-    core.debug(
+    core.info(
         `Uploading cache from ${archivePath} to gs://${bucketName}/${gcsKey}`
     );
 
-    // Initialize GCS client and references
+    // Initialize GCS client
     const storage = new Storage();
-    const bucket = storage.bucket(bucketName);
-    const file = bucket.file(gcsKey);
 
-    // Create the read stream from our archive file
-    const readStream = createReadStream(archivePath);
+    // Use parallel upload for better performance
+    await uploadInParallel(storage, bucketName, archivePath, gcsKey, cacheSize);
 
-    // (Optional) Track read progress for logs
-    let bytesUploaded = 0;
-    readStream.on("data", chunk => {
-        bytesUploaded += chunk.length;
-
-        if (bytesUploaded >= nextLogThreshold) {
-            const uploadedMB = (bytesUploaded / (1024 * 1024)).toFixed(2);
-            const totalMB = (cacheSize / (1024 * 1024)).toFixed(2);
-
-            core.info(`Uploaded ${uploadedMB} MB of ${totalMB} MB ...`);
-            nextLogThreshold += LOG_INTERVAL_BYTES;
-        }
-    });
-
-    // Pipe it to GCS via createWriteStream (resumable by default)
-    await new Promise<void>((resolve, reject) => {
-        readStream
-            .pipe(
-                file.createWriteStream({
-                    resumable: true,
-                    chunkSize: uploadPartSize
-                })
-            )
-            .on("error", err => {
-                reject(err);
-            })
-            .on("finish", () => {
-                core.info("Cache saved successfully.");
-                resolve();
-            });
-    });
+    core.info("Cache saved successfully.");
 }

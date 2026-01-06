@@ -121695,9 +121695,9 @@ const bucketName = process.env.BUCKET_NAME || "";
 const bucket = storage.bucket(bucketName);
 const versionSalt = "1.0";
 const uploadQueueSize = Number(process.env.UPLOAD_QUEUE_SIZE || "4");
-const uploadPartSize = Number(process.env.UPLOAD_PART_SIZE || "32") * 1024 * 1024;
+const uploadPartSize = Number(process.env.UPLOAD_PART_SIZE || "64") * 1024 * 1024;
 const downloadQueueSize = Number(process.env.DOWNLOAD_QUEUE_SIZE || "8");
-const downloadPartSize = Number(process.env.DOWNLOAD_PART_SIZE || "16") * 1024 * 1024;
+const downloadPartSize = Number(process.env.DOWNLOAD_PART_SIZE || "32") * 1024 * 1024;
 function getCacheVersion(paths, compressionMethod, enableCrossOsArchive = false) {
     const components = paths.slice();
     if (compressionMethod) {
@@ -121759,15 +121759,125 @@ function downloadCache(archiveLocation, archivePath, options) {
     });
 }
 exports.downloadCache = downloadCache;
+function uploadPartWithRetry(storage, bucketName, archivePath, part, retries = 3) {
+    return __awaiter(this, void 0, void 0, function* () {
+        let lastError;
+        for (let attempt = 1; attempt <= retries; attempt++) {
+            try {
+                const fileHandle = yield fs_1.promises.open(archivePath, "r");
+                try {
+                    const buffer = Buffer.alloc(part.size);
+                    yield fileHandle.read(buffer, 0, part.size, part.offset);
+                    const bucket = storage.bucket(bucketName);
+                    const file = bucket.file(part.partKey);
+                    yield new Promise((resolve, reject) => {
+                        const stream = file.createWriteStream({
+                            resumable: true
+                        });
+                        stream.on("error", reject);
+                        stream.on("finish", () => resolve());
+                        stream.end(buffer);
+                    });
+                    core.debug(`Successfully uploaded part ${part.partNumber} (${(part.size / (1024 * 1024)).toFixed(2)} MB)`);
+                    return;
+                }
+                finally {
+                    yield fileHandle.close();
+                }
+            }
+            catch (error) {
+                lastError = error;
+                if (attempt < retries) {
+                    core.warning(`Failed to upload part ${part.partNumber} (attempt ${attempt}/${retries}): ${lastError.message}`);
+                    yield new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+                }
+            }
+        }
+        throw new Error(`Failed to upload part ${part.partNumber} after ${retries} attempts: ${lastError === null || lastError === void 0 ? void 0 : lastError.message}`);
+    });
+}
+function uploadInParallel(storage, bucketName, archivePath, gcsKey, fileSize) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const partSize = uploadPartSize;
+        const concurrency = uploadQueueSize;
+        // For small files, use simple upload
+        if (fileSize <= partSize) {
+            core.debug("File size is small, using simple upload");
+            const bucket = storage.bucket(bucketName);
+            const file = bucket.file(gcsKey);
+            const readStream = (0, fs_1.createReadStream)(archivePath);
+            yield new Promise((resolve, reject) => {
+                readStream
+                    .pipe(file.createWriteStream({
+                    resumable: true
+                }))
+                    .on("error", reject)
+                    .on("finish", resolve);
+            });
+            return;
+        }
+        core.info(`Starting parallel upload with ${concurrency} concurrent parts of ${(partSize / (1024 * 1024)).toFixed(0)} MB each`);
+        const parts = [];
+        let partNumber = 0;
+        for (let offset = 0; offset < fileSize; offset += partSize) {
+            const size = Math.min(partSize, fileSize - offset);
+            parts.push({
+                partNumber: partNumber++,
+                offset,
+                size,
+                partKey: `${gcsKey}.part${partNumber}`
+            });
+        }
+        core.info(`Uploading ${parts.length} parts in parallel...`);
+        // Upload parts with controlled concurrency
+        const activeUploads = [];
+        let completed = 0;
+        const LOG_INTERVAL = 10;
+        for (const part of parts) {
+            const uploadPromise = uploadPartWithRetry(storage, bucketName, archivePath, part).then(() => {
+                completed++;
+                if (completed % LOG_INTERVAL === 0 || completed === parts.length) {
+                    const progress = ((completed / parts.length) * 100).toFixed(1);
+                    core.info(`Upload progress: ${completed}/${parts.length} parts (${progress}%)`);
+                }
+            });
+            activeUploads.push(uploadPromise);
+            if (activeUploads.length >= concurrency) {
+                yield Promise.race(activeUploads);
+                // Remove completed promises
+                const newActiveUploads = activeUploads.filter(p => {
+                    let completed = false;
+                    p.then(() => {
+                        completed = true;
+                    }).catch(() => {
+                        completed = true;
+                    });
+                    return !completed;
+                });
+                activeUploads.splice(0, activeUploads.length, ...newActiveUploads);
+            }
+        }
+        // Wait for all remaining uploads to complete
+        yield Promise.all(activeUploads);
+        core.info("All parts uploaded, composing final object...");
+        // Compose all parts into the final object
+        const bucket = storage.bucket(bucketName);
+        const finalFile = bucket.file(gcsKey);
+        const partFiles = parts.map(part => bucket.file(part.partKey));
+        yield finalFile.save("", { resumable: false }); // Create empty file first
+        yield bucket.combine(partFiles.map(f => f.name), gcsKey);
+        core.info("Composed final object, cleaning up parts...");
+        // Delete temporary part files
+        yield Promise.all(partFiles.map(file => file.delete().catch(() => { })));
+        core.info("Parallel upload completed successfully");
+    });
+}
 function saveCache(key, paths, archivePath, { compressionMethod, enableCrossOsArchive, cacheSize: archiveFileSize }) {
     return __awaiter(this, void 0, void 0, function* () {
         if (!bucketName) {
             throw new Error("Environment variable BUCKET_NAME not set");
         }
-        const LOG_INTERVAL_BYTES = 50 * 1024 * 1024; // 30 MB
-        let nextLogThreshold = LOG_INTERVAL_BYTES;
         // Construct your GCS key / prefix.
-        // You can rename this to `getGcsPrefix` if you use a custom helper.
         const gcsPrefix = getGcsPrefix(paths, {
             compressionMethod,
             enableCrossOsArchive
@@ -121776,41 +121886,14 @@ function saveCache(key, paths, archivePath, { compressionMethod, enableCrossOsAr
         // Get the cache size for logging
         const cacheSize = archiveFileSize
             ? archiveFileSize
-            : (0, fs_1.statSync)(archivePath).size; // or use your utility function
+            : (0, fs_1.statSync)(archivePath).size;
         core.info(`Cache Size: ~${Math.round(cacheSize / (1024 * 1024))} MB (${cacheSize} B)`);
-        core.debug(`Uploading cache from ${archivePath} to gs://${bucketName}/${gcsKey}`);
-        // Initialize GCS client and references
+        core.info(`Uploading cache from ${archivePath} to gs://${bucketName}/${gcsKey}`);
+        // Initialize GCS client
         const storage = new storage_1.Storage();
-        const bucket = storage.bucket(bucketName);
-        const file = bucket.file(gcsKey);
-        // Create the read stream from our archive file
-        const readStream = (0, fs_1.createReadStream)(archivePath);
-        // (Optional) Track read progress for logs
-        let bytesUploaded = 0;
-        readStream.on("data", chunk => {
-            bytesUploaded += chunk.length;
-            if (bytesUploaded >= nextLogThreshold) {
-                const uploadedMB = (bytesUploaded / (1024 * 1024)).toFixed(2);
-                const totalMB = (cacheSize / (1024 * 1024)).toFixed(2);
-                core.info(`Uploaded ${uploadedMB} MB of ${totalMB} MB ...`);
-                nextLogThreshold += LOG_INTERVAL_BYTES;
-            }
-        });
-        // Pipe it to GCS via createWriteStream (resumable by default)
-        yield new Promise((resolve, reject) => {
-            readStream
-                .pipe(file.createWriteStream({
-                resumable: true,
-                chunkSize: uploadPartSize
-            }))
-                .on("error", err => {
-                reject(err);
-            })
-                .on("finish", () => {
-                core.info("Cache saved successfully.");
-                resolve();
-            });
-        });
+        // Use parallel upload for better performance
+        yield uploadInParallel(storage, bucketName, archivePath, gcsKey, cacheSize);
+        core.info("Cache saved successfully.");
     });
 }
 exports.saveCache = saveCache;
