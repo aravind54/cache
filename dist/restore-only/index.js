@@ -121862,13 +121862,38 @@ function uploadInParallel(storage, bucketName, archivePath, gcsKey, fileSize) {
         core.info("All parts uploaded, composing final object...");
         // Compose all parts into the final object
         const bucket = storage.bucket(bucketName);
-        const finalFile = bucket.file(gcsKey);
         const partFiles = parts.map(part => bucket.file(part.partKey));
-        yield finalFile.save("", { resumable: false }); // Create empty file first
-        yield bucket.combine(partFiles.map(f => f.name), gcsKey);
-        core.info("Composed final object, cleaning up parts...");
-        // Delete temporary part files
-        yield Promise.all(partFiles.map(file => file.delete().catch(() => { })));
+        const allTempFiles = partFiles.map(f => f.name);
+        // GCS compose has a limit of 32 source objects
+        // If we have more, we need to compose in batches hierarchically
+        const MAX_COMPOSE_COUNT = 32;
+        let sourceFiles = partFiles.map(f => f.name);
+        let generation = 0;
+        while (sourceFiles.length > MAX_COMPOSE_COUNT) {
+            core.info(`Composing ${sourceFiles.length} parts in batches (generation ${generation})...`);
+            const composedFiles = [];
+            const batchSize = MAX_COMPOSE_COUNT - 1; // Use 31 to be safe
+            for (let i = 0; i < sourceFiles.length; i += batchSize) {
+                const batch = sourceFiles.slice(i, i + batchSize);
+                const composedKey = `${gcsKey}.composed${generation}_${Math.floor(i / batchSize)}`;
+                composedFiles.push(composedKey);
+                allTempFiles.push(composedKey);
+                const composedFile = bucket.file(composedKey);
+                yield composedFile.save("", { resumable: false });
+                yield bucket.combine(batch, composedKey);
+                core.debug(`Composed batch ${Math.floor(i / batchSize) + 1}: ${batch.length} parts into ${composedKey}`);
+            }
+            sourceFiles = composedFiles;
+            generation++;
+        }
+        core.info(`Creating final object from ${sourceFiles.length} intermediate file(s)...`);
+        // Final compose
+        const finalFile = bucket.file(gcsKey);
+        yield finalFile.save("", { resumable: false });
+        yield bucket.combine(sourceFiles, gcsKey);
+        core.info("Composed final object, cleaning up temporary files...");
+        // Delete all temporary files (parts and intermediate composed files)
+        yield Promise.all(allTempFiles.map(fileName => bucket.file(fileName).delete().catch(() => { })));
         core.info("Parallel upload completed successfully");
     });
 }
