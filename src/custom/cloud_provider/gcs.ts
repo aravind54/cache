@@ -82,7 +82,13 @@ export async function getCacheEntry(
 
         if (files.length > 0) {
             const sortedFiles = files.sort((a, b) => {
-                return Number(b.metadata.updated) - Number(a.metadata.updated);
+                // metadata.updated is an RFC3339 string (e.g. "2026-06-06T04:48:26.123Z");
+                // Number() of that is NaN, which made this comparator a no-op and the
+                // "most recent" pick silently degrade to GCS list order (lexicographic).
+                return (
+                    Date.parse(b.metadata.updated as string) -
+                    Date.parse(a.metadata.updated as string)
+                );
             });
             const gcsPath = sortedFiles[0].name;
             cacheEntry.cacheKey = gcsPath.replace(`${gcsPrefix}/`, "");
